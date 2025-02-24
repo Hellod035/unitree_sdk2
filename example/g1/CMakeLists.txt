@@ -1,0 +1,12 @@
+add_executable(g1_deploy low_level/g1_deploy.cpp)
+target_link_libraries(g1_deploy unitree_sdk2 "${TORCH_LIBRARIES}")
+set_property(TARGET g1_deploy PROPERTY CXX_STANDARD 17)
+
+add_executable(g1_deploy_onnx low_level/g1_deploy_onnx.cpp)
+target_link_libraries(g1_deploy_onnx unitree_sdk2 onnxruntime::onnxruntime)
+
+add_executable(g1_deploy_onnx_recurrent low_level/g1_deploy_onnx_recurrent.cpp)
+target_link_libraries(g1_deploy_onnx_recurrent unitree_sdk2 onnxruntime::onnxruntime)
+
+add_executable(g1_deploy_onnx_recurrent_heightmap low_level/g1_deploy_onnx_recurrent_heightmap.cpp)
+target_link_libraries(g1_deploy_onnx_recurrent_heightmap unitree_sdk2 onnxruntime::onnxruntime)
