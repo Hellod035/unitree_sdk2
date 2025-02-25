@@ -4,7 +4,6 @@
 #include <shared_mutex>
 #include <pthread.h>
 #include <sched.h>
-
 #include "gamepad.hpp"
 
 // DDS
@@ -16,6 +15,7 @@
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
+#include "unitree/idl/ros2/String_.hpp"
 
 // ONNX
 #include <onnxruntime_cxx_api.h>
@@ -23,10 +23,27 @@
 static const std::string HG_CMD_TOPIC = "rt/lowcmd";
 static const std::string HG_IMU_TORSO = "rt/secondary_imu";
 static const std::string HG_STATE_TOPIC = "rt/lowstate";
+static const std::string MAP_TOPIC = "height_map/height_map_data";
 
 using namespace unitree::common;
 using namespace unitree::robot;
 using namespace unitree_hg::msg::dds_;
+using namespace std_msgs::msg::dds_;
+
+std::array<float, 187> parseArrayFromString(const std::string& str) {
+    std::vector<float> result;
+    std::array<float, 187> arr;
+    std::istringstream iss(str);
+    char ch;
+    float value;
+    iss >> ch;
+    while (iss >> value) {
+        result.push_back(value);
+        iss >> ch;
+    }
+    std::copy(result.begin(), result.end(), arr.begin());
+    return arr;
+}
 
 template <typename T>
 class DataBuffer
@@ -165,10 +182,12 @@ private:
 
   DataBuffer<LowState_> low_state_buffer_;
   DataBuffer<MotorCommand> motor_command_buffer_;
+  DataBuffer<std::array<float, 187>> map_data_buffer_;
 
   ChannelPublisherPtr<LowCmd_> lowcmd_publisher_;
   ChannelSubscriberPtr<LowState_> lowstate_subscriber_;
   ChannelSubscriberPtr<IMUState_> imutorso_subscriber_;
+  ChannelSubscriberPtr<String_> map_subscriber_;
   ThreadPtr command_writer_ptr_, control_thread_ptr_;
 
   std::shared_ptr<unitree::robot::b2::MotionSwitcherClient> msc_;
@@ -187,6 +206,7 @@ private:
   std::array<float, 256> c_state = {0.0f};
 
   bool use_flat_heightmap_ = true;
+  bool heightmap_init_done = false;
 
 public:
   bool stop_flag = false;
@@ -222,6 +242,11 @@ public:
     // create subscriber
     lowstate_subscriber_.reset(new ChannelSubscriber<LowState_>(HG_STATE_TOPIC));
     lowstate_subscriber_->InitChannel(std::bind(&G1Example::LowStateHandler, this, std::placeholders::_1), 1);
+
+    // create map subscriber
+    map_subscriber_.reset(new ChannelSubscriber<String_>(MAP_TOPIC));
+    map_subscriber_->InitChannel(std::bind(&G1Example::MapDataHandler, this, std::placeholders::_1), 1);
+  
     // create threads
     command_writer_ptr_ = CreateRecurrentThreadEx("command_writer", UT_CPU_ID_NONE, publish_dt_*1e6, &G1Example::LowCommandWriter, this);
     control_thread_ptr_ = CreateRecurrentThreadEx("control", UT_CPU_ID_NONE, control_dt_*1e6, &G1Example::Control, this);
@@ -261,6 +286,7 @@ public:
 
   void LowStateHandler(const void *message)
   {
+    // std::cout << "LowStateHandler" << std::endl;
     LowState_ low_state = *(const LowState_ *)message;
     if (low_state.crc() != Crc32Core((uint32_t *)&low_state, (sizeof(LowState_) >> 2) - 1))
     {
@@ -279,7 +305,10 @@ public:
         use_flat_heightmap_ = false;
         std::cout << "Use GT HeightMap !" << std::endl;
     }
-
+    if (gamepad_.Y.on_release){
+        use_flat_heightmap_ = true;
+        std::cout << "Use Flat HeightMap !" << std::endl;
+    }
     // update mode machine
     if (mode_machine_ != low_state.mode_machine())
     {
@@ -311,6 +340,16 @@ public:
       dds_low_command.crc() = Crc32Core((uint32_t *)&dds_low_command, (sizeof(dds_low_command) >> 2) - 1);
       lowcmd_publisher_->Write(dds_low_command);
     }
+  }
+
+  void MapDataHandler(const void *message)
+  {
+
+    String_ map_str = *(const String_ *)message;
+    std::array<float, 187> map_data = parseArrayFromString(map_str.data());
+    map_data_buffer_.SetData(map_data);
+    heightmap_init_done = true;
+
   }
 
   void Stop()
@@ -416,9 +455,6 @@ public:
         std::array<float, 187> heightmap_data_flat;
         std::fill(heightmap_data_flat.begin(), heightmap_data_flat.end(), 0.322f);
 
-        std::array<float, 187> heightmap_data;
-        std::fill(heightmap_data.begin(), heightmap_data.end(), 0.322f);
-
         std::copy(ang_vel.begin(), ang_vel.end(), obs.begin());
         std::copy(projected_gravity.begin(), projected_gravity.end(), obs.begin() + 3);
         std::copy(command.begin(), command.end(), obs.begin() + 6);
@@ -426,12 +462,16 @@ public:
         std::copy(dq.begin(), dq.end(), obs.begin() + 9 + 29);
         std::copy(last_action.begin(), last_action.end(), obs.begin() + 9 + 29 * 2);
 
-        if (use_flat_heightmap_) {
+        if (use_flat_heightmap_ || !heightmap_init_done) {
           std::copy(heightmap_data_flat.begin(), heightmap_data_flat.end(), obs.begin() + 9 + 29 * 3);
         } else {
-          std::copy(heightmap_data.begin(), heightmap_data.end(), obs.begin() + 9 + 29 * 3);
+          if (const auto& heightmap_data_ptr = map_data_buffer_.GetData()) {
+            const auto& heightmap_data = *heightmap_data_ptr;
+            std::copy(heightmap_data.begin(), heightmap_data.end(), obs.begin() + 9 + 29 * 3);
+          }
         }
 
+        // std::cout << "last obs:" << obs[obs.size()-1] << std::endl;
         std::vector<float> input_tensor_values(obs.begin(), obs.end());
 
         std::vector<int64_t> obs_dims = {1, static_cast<int64_t>(obs.size())};

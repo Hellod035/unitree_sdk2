@@ -7,3 +7,4 @@ build
 #cland
 .cache
 *.pyc
+height_maps
