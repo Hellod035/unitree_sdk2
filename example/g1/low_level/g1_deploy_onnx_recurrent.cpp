@@ -20,6 +20,8 @@
 // ONNX
 #include <onnxruntime_cxx_api.h>
 
+#include "uctrl_logger.hpp"
+
 static const std::string HG_CMD_TOPIC = "rt/lowcmd";
 static const std::string HG_IMU_TORSO = "rt/secondary_imu";
 static const std::string HG_STATE_TOPIC = "rt/lowstate";
@@ -27,6 +29,30 @@ static const std::string HG_STATE_TOPIC = "rt/lowstate";
 using namespace unitree::common;
 using namespace unitree::robot;
 using namespace unitree_hg::msg::dds_;
+
+struct G1Data{
+  uint64_t timestamp;
+  int64_t timeperiod;
+  float q[29];
+  float dq[29];
+  float ddq[29];
+  float tau[29];
+  float q_cmd[29];
+  static std::string messageName() {return "g1_log";}
+  static std::vector<ulog_cpp::Field> fields(){
+    return {
+      {"uint64_t", "timestamp"},
+      {"int64_t", "timeperiod"},
+      {"float", "q", 29},
+      {"float", "dq", 29},
+      {"float", "ddq", 29},
+      {"float", "tau", 29},
+      {"float", "q_cmd", 29},
+    };
+  }
+};
+
+logger<G1Data, 256> g1_logger;
 
 template <typename T>
 class DataBuffer
@@ -170,7 +196,7 @@ private:
   ChannelPublisherPtr<LowCmd_> lowcmd_publisher_;
   ChannelSubscriberPtr<LowState_> lowstate_subscriber_;
   ChannelSubscriberPtr<IMUState_> imutorso_subscriber_;
-  ThreadPtr command_writer_ptr_, control_thread_ptr_;
+  ThreadPtr command_writer_ptr_, control_thread_ptr_, logger_thread_ptr_;
 
   std::shared_ptr<unitree::robot::b2::MotionSwitcherClient> msc_;
 
@@ -224,6 +250,7 @@ public:
     // create threads
     command_writer_ptr_ = CreateRecurrentThreadEx("command_writer", UT_CPU_ID_NONE, publish_dt_*1e6, &G1Example::LowCommandWriter, this);
     control_thread_ptr_ = CreateRecurrentThreadEx("control", UT_CPU_ID_NONE, control_dt_*1e6, &G1Example::Control, this);
+    logger_thread_ptr_ = CreateRecurrentThreadEx("logger", UT_CPU_ID_NONE, 0.05*1e6, &G1Example::logger, this);
 
     try {
         policy_session = new Ort::Session(env, "policy.onnx", Ort::SessionOptions{nullptr});
@@ -289,6 +316,7 @@ public:
     LowCmd_ dds_low_command;
     dds_low_command.mode_pr() = static_cast<uint8_t>(mode_pr_);
     dds_low_command.mode_machine() = mode_machine_;
+    g1_logger.calc_period(std::chrono::steady_clock::now());
 
     const std::shared_ptr<const MotorCommand> mc = motor_command_buffer_.GetData();
     if (mc)
@@ -305,6 +333,22 @@ public:
 
       dds_low_command.crc() = Crc32Core((uint32_t *)&dds_low_command, (sizeof(dds_low_command) >> 2) - 1);
       lowcmd_publisher_->Write(dds_low_command);
+
+      const std::shared_ptr<const LowState_> ls = low_state_buffer_.GetData();
+      G1Data data_tmp;
+
+      if(ls){
+        const std::array<::unitree_hg::msg::dds_::MotorState_, 35> motor_stats = ls->motor_state();
+        for (int i = 0; i < G1_NUM_MOTOR; i++)
+        {
+          data_tmp.q[i] = motor_stats[i].q();
+          data_tmp.dq[i] = motor_stats[i].dq();
+          data_tmp.ddq[i] = motor_stats[i].ddq();
+          data_tmp.tau[i] = motor_stats[i].tau_est();
+          data_tmp.q_cmd[i] = mc->q_target.at(i);;
+        }
+        g1_logger.send_data(data_tmp);
+      }
     }
   }
 
@@ -316,6 +360,8 @@ public:
     {
       control_thread_ptr_->Wait();
       control_thread_ptr_.reset();
+      command_writer_ptr_->Wait();
+      command_writer_ptr_.reset();
     }
     CreateDampingCommand();
     LowCommandWriter();
@@ -457,6 +503,11 @@ public:
       motor_command_buffer_.SetData(motor_command_tmp);
     }
   }
+
+  void logger(){
+    g1_logger.log_data();
+  }
+
 };
 
 int main(int argc, char const *argv[])
@@ -466,6 +517,7 @@ int main(int argc, char const *argv[])
     std::cout << "Usage: g1_deploy_onnx_recurrent network_interface" << std::endl;
     exit(0);
   }
+  g1_logger.setup_writer();
   std::string networkInterface = argv[1];
   G1Example custom(networkInterface);
   while (!custom.stop_flag)
@@ -473,5 +525,6 @@ int main(int argc, char const *argv[])
     sleep(0.02);
   }
   custom.Stop();
+  sleep(0.5);
   return 0;
 }

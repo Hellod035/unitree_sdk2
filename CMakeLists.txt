@@ -5,7 +5,7 @@ project(unitree_sdk2 VERSION 2.0.0)
 option(BUILD_EXAMPLES "Build examples" ON)
 
 ## Set compiler to use c++ 17 features
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -33,6 +33,8 @@ message(STATUS "Current system architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
 ## Import thirdparty libraries
 add_subdirectory(thirdparty)
+add_subdirectory(logger/mailbox)
+add_subdirectory(logger/ulog_cpp)
 
 ## Import Unitree SDK2 library
 set(UNITREE_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/${CMAKE_SYSTEM_PROCESSOR})
